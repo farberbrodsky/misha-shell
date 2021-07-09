@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <sys/wait.h>
 
 #define BUF_SIZE 1024
 
@@ -223,7 +224,8 @@ struct Tree_node *read_and_parse_line() {
                     }
                     in_quotes_len += 1;
                 }
-                char *in_quotes = malloc(in_quotes_len);
+                char *in_quotes = malloc(in_quotes_len + 1);
+                in_quotes[in_quotes_len] = '\0';
                 for (int j = 0; j < in_quotes_len; j++) {
                     if (cmd[i] == '\\') {
                         i++;
@@ -251,7 +253,8 @@ struct Tree_node *read_and_parse_line() {
                     }
                     arg_len++;
                 }
-                char *in_arg = malloc(arg_len);
+                char *in_arg = malloc(arg_len + 1);
+                in_arg[arg_len] = 0;
                 int first_i = i;
                 while (i < x_len && cmd[i] != ')' && cmd[i] != ' ') {
                     in_arg[i - first_i] = cmd[i];
@@ -279,11 +282,82 @@ struct Tree_node *read_and_parse_line() {
     return tree;
 }
 
+char ** ENV_VARIABLES;
+
+char **Tree_extract_argv(struct Tree_node *tree) {
+    if (tree->type == TREE_PARENTHESES) {
+        struct Tree_parentheses_data *data = (struct Tree_parentheses_data *)tree->data;
+        char **argv = malloc(sizeof(char *) * (data->arr_len + 1));
+        int argv_len = 0;
+        for (int j = 0; j < data->arr_len; j++) {
+            if (data->arr[j]->type == TREE_ARGUMENT) {
+                argv[argv_len++] = ((struct Tree_argument_data *)data->arr[j]->data)->s;
+            }
+        }
+        argv[data->arr_len] = NULL;
+        return argv;
+    } else if (tree->type == TREE_ARGUMENT) {
+        char **argv = calloc(1, sizeof(char *) * 2);
+        struct Tree_argument_data *data = (struct Tree_argument_data *)tree->data;
+        argv[0] = data->s;
+        return argv;
+    }
+    return NULL;
+}
+
+// TODO look for executables in path
+// TODO builtins
+void exec_thing(char **argv) {
+    execve(argv[0], argv, ENV_VARIABLES);
+}
+
+void Parentheses_execute(struct Tree_node *tree) {
+    struct Tree_parentheses_data *data = (struct Tree_parentheses_data *)tree->data;
+    if (data->arr_len == 1) {
+        if (data->arr[0]->type == TREE_PARENTHESES) return Parentheses_execute(data->arr[0]);  // useless parentheses - run whatever's inside
+        else if (data->arr[0]->type == TREE_TO_FILE) {
+            // To file!
+            struct Tree_to_file_data *ttf_data = (struct Tree_to_file_data *)data->arr[0]->data;
+            if (fork() == 0) {
+                char **argv = Tree_extract_argv(ttf_data->a);
+                close(1);
+                open(ttf_data->out->s, O_CREAT|O_WRONLY|O_TRUNC, S_IRWXU);
+                exec_thing(argv);
+            } else {
+                wait(NULL);
+            }
+            return;
+        } else if (data->arr[0]->type == TREE_PIPE) {
+            // Pipe!
+            puts("Pipe!!\n");
+            return;
+        }
+    }
+    // run arguments as a command, let's use execve
+    if (fork() == 0) {
+        char **argv = Tree_extract_argv(tree);
+        exec_thing(argv);
+    } else {
+        wait(NULL);
+    }
+}
+
 int main() {
+    // copy the environment variables
+    int env_len = 0;
+    while (__environ[env_len] != NULL) {
+        env_len++;
+    }
+    ENV_VARIABLES = malloc(sizeof(char *) * (env_len + 1));
+    for (int i = 0; i < env_len; i++) {
+        ENV_VARIABLES[i] = strdup(__environ[i]);
+    }
+
     while (true) {
         struct Tree_node *tree = read_and_parse_line();
         Tree_print(tree);
         puts("\n");
+        Parentheses_execute(tree);
         Tree_free(tree);
     }
     return 0;
