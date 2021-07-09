@@ -282,8 +282,6 @@ struct Tree_node *read_and_parse_line() {
     return tree;
 }
 
-char ** ENV_VARIABLES;
-
 char **Tree_extract_argv(struct Tree_node *tree) {
     if (tree->type == TREE_PARENTHESES) {
         struct Tree_parentheses_data *data = (struct Tree_parentheses_data *)tree->data;
@@ -305,10 +303,43 @@ char **Tree_extract_argv(struct Tree_node *tree) {
     return NULL;
 }
 
-// TODO look for executables in path
-// TODO builtins
-void exec_thing(char **argv) {
-    execve(argv[0], argv, ENV_VARIABLES);
+bool try_cd_or_exit_or_whatever(char **argv) {
+    if (strcmp(argv[0], "exit") == 0) {
+        exit(0);
+    } else if (strcmp(argv[0], "cd") == 0) {
+        // change PWD env variable...
+        write(1, "TODO: implement cd\n", 19);
+        return true;
+    }
+    return false;
+}
+
+void look_in_path(char **name) {
+    if (access(*name, F_OK) == 0) {
+        return;  // file exists
+    }
+    char *path = strdup(getenv("PATH"));
+    char *saveptr = NULL;
+    char *token = strtok_r(path, ":", &saveptr);
+    while (token != NULL) {
+        unsigned long token_len = strlen(token);
+        unsigned long argv0_len = strlen(*name);
+        char *token_plus_me = malloc(token_len + 2 + argv0_len);
+        strcpy(token_plus_me, token);
+        token_plus_me[token_len] = '/';
+        strcpy(token_plus_me + token_len + 1, *name);
+
+        if (access(token_plus_me, F_OK) == 0) {
+            *name = token_plus_me;
+            free(path);
+            return;
+        }
+        free(token_plus_me);
+
+        token = strtok_r(NULL, ":", &saveptr);
+    }
+    *name = NULL;
+    free(path);
 }
 
 void Parentheses_execute(struct Tree_node *tree) {
@@ -318,14 +349,23 @@ void Parentheses_execute(struct Tree_node *tree) {
         else if (data->arr[0]->type == TREE_TO_FILE) {
             // To file!
             struct Tree_to_file_data *ttf_data = (struct Tree_to_file_data *)data->arr[0]->data;
-            if (fork() == 0) {
-                char **argv = Tree_extract_argv(ttf_data->a);
-                close(1);
-                open(ttf_data->out->s, O_CREAT|O_WRONLY|O_TRUNC, S_IRWXU);
-                exec_thing(argv);
-            } else {
-                wait(NULL);
+            char **argv = Tree_extract_argv(ttf_data->a);
+            if (!try_cd_or_exit_or_whatever(argv)) {
+                char *cmd = argv[0];
+                look_in_path(&cmd);
+                if (cmd == NULL) {
+                    write(2, "Not found.\n", 11);
+                    return;
+                }
+                if (fork() == 0) {
+                    close(1);
+                    open(ttf_data->out->s, O_CREAT|O_WRONLY|O_TRUNC, S_IRWXU);
+                    execve(cmd, argv, __environ);
+                } else {
+                    wait(NULL);
+                }
             }
+            free(argv);
             return;
         } else if (data->arr[0]->type == TREE_PIPE) {
             // Pipe!
@@ -334,25 +374,24 @@ void Parentheses_execute(struct Tree_node *tree) {
         }
     }
     // run arguments as a command, let's use execve
-    if (fork() == 0) {
-        char **argv = Tree_extract_argv(tree);
-        exec_thing(argv);
-    } else {
-        wait(NULL);
+    char **argv = Tree_extract_argv(tree);
+    if (!try_cd_or_exit_or_whatever(argv)) {
+        char *cmd = argv[0];
+        look_in_path(&cmd);
+        if (cmd == NULL) {
+            write(2, "Not found.\n", 11);
+            return;
+        }
+        if (fork() == 0) {
+            execve(cmd, argv, __environ);
+        } else {
+            wait(NULL);
+        }
     }
+    free(argv);
 }
 
 int main() {
-    // copy the environment variables
-    int env_len = 0;
-    while (__environ[env_len] != NULL) {
-        env_len++;
-    }
-    ENV_VARIABLES = malloc(sizeof(char *) * (env_len + 1));
-    for (int i = 0; i < env_len; i++) {
-        ENV_VARIABLES[i] = strdup(__environ[i]);
-    }
-
     while (true) {
         struct Tree_node *tree = read_and_parse_line();
         Tree_print(tree);
